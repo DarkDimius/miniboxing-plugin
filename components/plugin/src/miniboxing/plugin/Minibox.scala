@@ -9,12 +9,22 @@ import scala.tools.nsc.symtab.Flags
 import scala.tools.nsc.transform.InfoTransform
 import scala.tools.nsc.transform.TypingTransformers
 
-trait MiniboxComponent extends
+/** Specialization hijacking component `@specialized T -> @miniboxed T` */
+trait HijackComponent extends
+    PluginComponent
+    with MiniboxInfoHijack
+    with MiniboxDefinitions {
+
+  def flag_hijack_spec: Boolean
+}
+
+/** Duplicator component `def t -> def t_L, def t_J` */
+trait MiniboxDuplComponent extends
     PluginComponent
     with MiniboxLogic
-    with MiniboxInfoTransformation
+    with MiniboxDuplInfoTransformation
     with MiniboxLogging
-    with MiniboxTreeTransformation
+    with MiniboxDuplTreeTransformation
     with MiniboxTreeSpecializer
     with MiniboxPeepholeTransformation
     with MiniboxSpecializationInfo
@@ -35,14 +45,17 @@ trait MiniboxComponent extends
   def flag_loader_friendly: Boolean
 }
 
-trait HijackComponent extends
+/** Specializer component `T @storage -> Long` */
+trait MiniboxSpecComponent extends
     PluginComponent
-    with MiniboxInfoHijack
-    with MiniboxDefinitions {
+    with MiniboxPostInfoTransformer
+    with MiniboxPostTreeTransformer {
 
-  def flag_hijack_spec: Boolean
+  val minibox: MiniboxDuplComponent { val global: MiniboxSpecComponent.this.global.type }
+  def flag_log: Boolean
+  def flag_debug: Boolean
+  def flag_stats: Boolean
 }
-
 
 class Minibox(val global: Global) extends Plugin {
   import global._
@@ -50,7 +63,7 @@ class Minibox(val global: Global) extends Plugin {
   val name = "minibox"
   val description = "spcializes generic classes"
 
-  val components = List[PluginComponent](HijackPhase, MiniboxPhase)
+  val components = List[PluginComponent](HijackPhase, MiniboxDuplPhase, MiniboxSpecPhase)
 
   var flag_log = sys.props.get("miniboxing.log").isDefined
   var flag_debug = sys.props.get("miniboxing.debug").isDefined
@@ -86,12 +99,12 @@ class Minibox(val global: Global) extends Plugin {
     s"  -P:${name}:spec-no-opt       don't optimize method specialization, do create useless specializations" +
     s"  -P:${name}:loader            generate classloader-friendly code (but more verbose)")
 
-  private object MiniboxPhase extends MiniboxComponent {
+  private object MiniboxDuplPhase extends MiniboxDuplComponent {
 
     val global: Minibox.this.global.type = Minibox.this.global
     val runsAfter = List("refchecks")
     override val runsRightAfter = Some("uncurry")
-    val phaseName = Minibox.this.name
+    val phaseName = Minibox.this.name + "-dupl"
 
     def flag_log = Minibox.this.flag_log
     def flag_debug = Minibox.this.flag_debug
@@ -128,6 +141,24 @@ class Minibox(val global: Global) extends Plugin {
     override def newTransformer(unit: CompilationUnit): Transformer = new Transformer {
       override def transform(tree: Tree) = tree
     }
+  }
 
+  private lazy val MiniboxSpecPhase = new {
+    val minibox: MiniboxDuplPhase.type = MiniboxDuplPhase
+  } with MiniboxSpecComponent {
+    val global: Minibox.this.global.type = Minibox.this.global
+    val runsAfter = List(MiniboxDuplPhase.phaseName)
+    override val runsRightAfter = Some(MiniboxDuplPhase.phaseName)
+    val phaseName = Minibox.this.name + "-spec"
+
+    def flag_log = Minibox.this.flag_log
+    def flag_debug = Minibox.this.flag_debug
+    def flag_stats = Minibox.this.flag_stats
+
+    var mboxPhase : StdPhase = _
+    override def newPhase(prev: scala.tools.nsc.Phase): StdPhase = {
+      mboxPhase = new Phase(prev)
+      mboxPhase
+    }
   }
 }
